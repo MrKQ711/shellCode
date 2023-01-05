@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <Windows.h>
+#include <stdint.h>
 
 DWORD oldEntry;
 DWORD align(DWORD size, DWORD align, DWORD addr)
@@ -115,7 +116,6 @@ boolean addShellCode(char *filepath)
     PIMAGE_NT_HEADERS nt = (PIMAGE_NT_HEADERS)(pByte + dos->e_lfanew);
     PIMAGE_SECTION_HEADER first = IMAGE_FIRST_SECTION(nt);
     PIMAGE_SECTION_HEADER last = first + nt->FileHeader.NumberOfSections - 1;
-    nt->FileHeader.Characteristics = 0x010F;
     oldEntry = nt->OptionalHeader.AddressOfEntryPoint + nt->OptionalHeader.ImageBase;
     // printf("oldEntry: %x", oldEntry);
     nt->OptionalHeader.AddressOfEntryPoint = last->VirtualAddress;
@@ -174,67 +174,66 @@ boolean addShellCode(char *filepath)
 }
 
 // get entry point from shellcode
-char *getShellCode(char *filepath)
+uint32_t getShellCode(char *filepath)
 {
     HANDLE file = CreateFile(filepath, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (file == INVALID_HANDLE_VALUE)
     {
         printf("CreateFile failed with error %d", GetLastError());
-        return FALSE;
+        // return FALSE;
+        exit(0);
     }
+
     DWORD dw = 0;
     DWORD fileSize = GetFileSize(file, NULL);
     unsigned char *pByte = (unsigned char *)malloc(fileSize);
     if (pByte == NULL)
     {
         printf("malloc failed with error %d", GetLastError());
-        return FALSE;
+        // return FALSE;
+        exit(0);
     }
     ReadFile(file, pByte, fileSize, &dw, NULL);
     if (dw != fileSize)
     {
         printf("ReadFile failed with error %d", GetLastError());
-        return FALSE;
+        // return FALSE;
+        exit(0);
     }
+
     // get the last section
     PIMAGE_DOS_HEADER dos = (PIMAGE_DOS_HEADER)pByte;
     PIMAGE_NT_HEADERS nt = (PIMAGE_NT_HEADERS)(pByte + dos->e_lfanew);
     PIMAGE_SECTION_HEADER first = IMAGE_FIRST_SECTION(nt);
     PIMAGE_SECTION_HEADER last = first + nt->FileHeader.NumberOfSections - 1;
-    // get shellcode from last section
-    char *shellcode = (char *)(pByte + last->PointerToRawData);
-    // print the shellcode from \x68 to \xc3
-    for (int i = 0; i < last->SizeOfRawData; i++)
-    {
-        if (shellcode[i] == '\x68')
-        {
-            printf("shellcode: ");
-        }
-        if (shellcode[i] == '\xc3')
-        {
-            printf("\n");
-        }
-        if (shellcode[i] == '\x68' || shellcode[i] == '\xc3')
-        {
-            continue;
-        }
-        // delete the char 'f' in the shellcode
-        if (shellcode[i] == 'f')
-        {
-            continue;
-        }
-        printf("%x", shellcode[i]);
-        // printf("%c", shellcode[i]);
-    }
+
+    // trỏ con trỏ pByte tới vị trí offset 0x100 của section cuối cùng
+    pByte += last->PointerToRawData + 0x100;
+    uint32_t first2Bytes = *(uint32_t *)(pByte + 14);
+    //printf("first2Bytes: %x", first2Bytes);
     CloseHandle(file);
+    return first2Bytes;
 }
 // delete the shellcode section we added and restore the original file
 boolean restoreFile(char *filepath)
 {
+    uint32_t first2Bytes = getShellCode(filepath);
     HANDLE file = CreateFile(filepath, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (file == INVALID_HANDLE_VALUE)
     {
         printf("CreateFile failed with error %d", GetLastError());
+        return FALSE;
+    }
+    HANDLE hMap = CreateFileMapping(file, NULL, PAGE_READWRITE, 0, 0, NULL);
+    if (hMap == NULL)
+    {
+        printf("CreateFileMapping failed with error %d", GetLastError());
+        return FALSE;
+    }
+    LPVOID lpBase = MapViewOfFile(hMap, FILE_MAP_ALL_ACCESS, 0, 0, 0);
+    if (lpBase == NULL)
+    {
+        printf("MapViewOfFile failed with error %d", GetLastError());
         return FALSE;
     }
     DWORD dw = 0;
@@ -264,34 +263,34 @@ boolean restoreFile(char *filepath)
         return FALSE;
     }
     PIMAGE_SECTION_HEADER section = IMAGE_FIRST_SECTION(nt);
+    PIMAGE_SECTION_HEADER last = section + nt->FileHeader.NumberOfSections - 1;
+    nt->OptionalHeader.AddressOfEntryPoint = first2Bytes - nt->OptionalHeader.ImageBase;
+    SetFilePointer(file, 0, NULL, FILE_BEGIN);
+    UnmapViewOfFile(lpBase);
+    CloseHandle(hMap);
+    WriteFile(file, pByte, fileSize, &dw, NULL);
+
+    SetFilePointer(file, 0, NULL, FILE_BEGIN);
     for (int i = 0; i < nt->FileHeader.NumberOfSections; i++)
     {
         if (strcmp((char *)section[i].Name, ".code") == 0)
         {
+
             // delete the shellcode section
             memmove(&section[i], &section[i + 1], (nt->FileHeader.NumberOfSections - i - 1) * sizeof(IMAGE_SECTION_HEADER));
             nt->FileHeader.NumberOfSections -= 1;
+            nt->OptionalHeader.SizeOfImage -= sizeof(IMAGE_SECTION_HEADER);
             nt->OptionalHeader.SizeOfHeaders -= sizeof(IMAGE_SECTION_HEADER);
             break;
         }
     }
-
-    nt->OptionalHeader.AddressOfEntryPoint = oldEntry;
-    printf("oldEntry: %x", nt->OptionalHeader.AddressOfEntryPoint);
-    // restore the original file
-    SetFilePointer(file, 0, NULL, FILE_BEGIN);
+    // how to reduce the size of the file?
+    //SetFilePointer(file, 0, NULL, FILE_BEGIN);
+    SetEndOfFile(file);
     WriteFile(file, pByte, fileSize, &dw, NULL);
-    if (dw != fileSize)
-    {
-        printf("WriteFile failed with error %d", GetLastError());
-        return FALSE;
-    }
-
-    // find the section .text and restore the original address of entry point
     CloseHandle(file);
     return TRUE;
 }
-
 // i don't know how to inject shellcode into all kinds of exe file, so i just use this function to test
 
 int main(int argc, char *argv[])
@@ -301,9 +300,9 @@ int main(int argc, char *argv[])
         printf("Usage: testV20.exe filepath sectionName sizeOfSection");
         return 0;
     }
-    addSection(argv[1], argv[2], atoi(argv[3]));
-    addShellCode(argv[1]);
+    // addSection(argv[1], argv[2], atoi(argv[3]));
+    // addShellCode(argv[1]);
     // print shellcode
-    // restoreFile(argv[1]);
+    restoreFile(argv[1]);
     return 0;
 }
